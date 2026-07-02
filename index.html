@@ -68,7 +68,7 @@
     .nav-search-btn svg { width: 14px; height: 14px; fill: currentColor; }
 
     /* ── SEARCH DROPDOWN ── */
-    .search-dropdown { position: absolute; top: calc(100% + 6px); left: 0; right: 0; background: var(--charcoal); border: 1px solid #3a3a3a; z-index: 300; max-height: 380px; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,0.4); display: none; }
+    .search-dropdown { position: fixed; background: var(--charcoal); border: 1px solid #3a3a3a; z-index: 9500; max-height: 380px; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,0.4); display: none; }
     .search-dropdown.open { display: block; }
     .search-result-item { display: flex; align-items: center; gap: 12px; padding: 10px 14px; cursor: pointer; border-bottom: 1px solid #2a2a2a; transition: background 0.15s; }
     .search-result-item:hover { background: #222; }
@@ -730,7 +730,6 @@
       <button class="nav-search-btn" onclick="document.getElementById('navSearchInput').focus()">
         <svg viewBox="0 0 24 24"><path d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
       </button>
-      <div class="search-dropdown" id="searchDropdown"></div>
     </div>
     <div class="theme-btns">
       <button class="theme-btn active" onclick="setTheme('light')">Terang</button>
@@ -747,6 +746,7 @@
     </div>
   </div>
 </nav>
+<div class="search-dropdown" id="searchDropdown"></div>
 
 <!-- SOCIAL MEDIA BAR -->
 <div class="social-bar">
@@ -1036,8 +1036,8 @@
 /* ============================================================
    HARMONIFASHION - SUPABASE INTEGRATION (v2 - Full Features)
    ============================================================ */
-const SUPABASE_URL = 'https://kkinsmhwwtwfxmvvipdg.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtraW5zbWh3d3R3ZnhtdnZpcGRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI5NzQ3ODYsImV4cCI6MjA5ODU1MDc4Nn0.61EEujin06uEGTv48YFUZ25uaH-rJFTvh_dODgt_3OA'
+const SUPABASE_URL = 'https://crcydatfvlxkccsycdhe.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNyY3lkYXRmdmx4a2Njc3ljZGhlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI5ODE1NDEsImV4cCI6MjA5ODU1NzU0MX0.maVUTZxDLgv2roKvFLgNzvw17WuwzB2kvZd541yz5mc'
 const SUPABASE_STORAGE_BUCKET = 'harmonifashion';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -1197,9 +1197,21 @@ function handleSearchInput(val) {
 }
 function showSearchDropdown() { if(searchQuery) renderSearchDropdown(); }
 function hideSearchDropdown() { const d=document.getElementById('searchDropdown'); if(d) d.classList.remove('open'); }
+function positionSearchDropdown() {
+  const wrap=document.getElementById('navSearchWrap');
+  const d=document.getElementById('searchDropdown');
+  if(!wrap||!d) return;
+  const r=wrap.getBoundingClientRect();
+  d.style.top=(r.bottom+6)+'px';
+  d.style.left=r.left+'px';
+  d.style.width=r.width+'px';
+}
+window.addEventListener('resize',positionSearchDropdown);
+window.addEventListener('scroll',positionSearchDropdown,true);
 function renderSearchDropdown() {
   const d=document.getElementById('searchDropdown'); if(!d) return;
   if(!searchQuery) { d.classList.remove('open'); return; }
+  positionSearchDropdown();
   const results=PRODUCTS.filter(p=>
     p.name.toLowerCase().includes(searchQuery)||
     p.brand.toLowerCase().includes(searchQuery)||
