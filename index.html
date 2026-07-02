@@ -253,6 +253,8 @@
     .review-list { display: flex; flex-direction: column; gap: 12px; margin-bottom: 14px; }
     .review-item { background: var(--dark); border: 1px solid #2e2e2e; border-radius: 8px; padding: 14px 16px; }
     .review-item-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .review-store-tag { margin-left: auto; font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--gold); background: var(--gold-pale); padding: 3px 9px; border-radius: 20px; white-space: nowrap; flex-shrink: 0; }
+    body.dark .review-store-tag { background: rgba(201,168,76,0.15); }
     .review-avatar { width: 34px; height: 34px; border-radius: 50%; background: linear-gradient(135deg, #c0392b, #922b21); color: #fff; font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex-shrink: 0; letter-spacing: 0.02em; }
     .review-item-meta { display: flex; flex-direction: column; line-height: 1.3; }
     .review-author { font-size: 12.5px; font-weight: 500; color: var(--off-white); }
@@ -830,6 +832,7 @@
     <div class="results-bar">
       <span id="resultsCount">Menampilkan semua produk</span>
     </div>
+    <div id="globalEmptyState" class="empty-state" style="display:none;">Tidak ada produk yang sesuai dengan filter yang dipilih.</div>
     <div id="sectionsContainer"></div>
   </main>
 </div>
@@ -840,19 +843,6 @@
     <p class="stores-eyebrow">Kunjungi Kami</p>
     <h2 class="stores-title">Cabang <em>HarmoniFashion</em></h2>
     <p class="stores-sub">Pilih cabang, lihat peta lokasi, beri rating, dan tinggalkan ulasan pengalaman belanja Anda.</p>
-  </div>
-
-  <div class="overall-rating-bar" id="overallRatingBar" style="max-width:1300px;margin:0 auto 28px;">
-    <div>
-      <div class="overall-rating-label">Rating Rata-rata Semua Cabang</div>
-      <div style="display:flex;align-items:baseline;gap:10px;margin-top:4px;">
-        <div class="overall-rating-score" id="overallScore">—</div>
-        <div>
-          <div class="overall-stars" id="overallStars"></div>
-          <div class="overall-meta" id="overallMeta">Belum ada rating</div>
-        </div>
-      </div>
-    </div>
   </div>
 
   <div class="stores-grid">
@@ -1381,7 +1371,7 @@ async function submitReview() {
     if(!rErr){ if(r.userRating>0){r.total=r.total-r.userRating+wrRating;}else{r.total+=wrRating;r.count+=1;} r.userRating=wrRating; updateOverallRating(); }
   }
   nameEl.value='';textEl.value='';pendingPhotos[storeId]=[];wrRating=0;
-  renderPhotoPreview(); renderWrStars(); renderReviewsPanel(storeId);
+  renderPhotoPreview(); renderWrStars(); renderReviewsPanel();
   toggleWriteReviewForm();
   showToast('Ulasan berhasil dikirim! Menunggu konfirmasi admin sebelum tampil di halaman ini.');
 }
@@ -1556,6 +1546,7 @@ function applyFilters(){
     return true;
   });
   filtered=sortProducts(filtered,sortMode);
+  const hasActiveFilter=brands.length>0||colors.length>0||conds.length>0||prices.length>0;
   let totalShown=0;
   CATEGORIES.forEach(cat=>{
     const items=filtered.filter(p=>p.cat===cat.id);totalShown+=items.length;
@@ -1564,10 +1555,14 @@ function applyFilters(){
     const countEl=document.querySelector('#sec-'+cat.id+' .sec-count');
     if(countEl) countEl.textContent='('+items.length+' produk)';
     const secEl=document.getElementById('sec-'+cat.id);
-    if(secEl) secEl.style.display=(activeCategory==='all'||activeCategory===cat.id)?'':'none';
+    const matchesCategory=(activeCategory==='all'||activeCategory===cat.id);
+    const shouldShow=matchesCategory&&(!hasActiveFilter||items.length>0);
+    if(secEl) secEl.style.display=shouldShow?'':'none';
   });
   const rc=document.getElementById('resultsCount');
   if(rc) rc.innerHTML='Menampilkan <strong>'+totalShown+'</strong> dari <strong>'+PRODUCTS.length+'</strong> produk';
+  const globalEmptyEl=document.getElementById('globalEmptyState');
+  if(globalEmptyEl) globalEmptyEl.style.display=(totalShown===0)?'':'none';
   // Refresh wishlist buttons
   wishlistIds.forEach(id=>refreshWishlistButtons(id));
 }
@@ -1703,7 +1698,7 @@ function selectStore(id){
   showAllReviews=false; wrRating=0;
   document.querySelectorAll('.store-tab-btn').forEach(btn=>btn.classList.toggle('active',btn.dataset.store===id));
   renderStoreInfoCard(s);
-  renderReviewsPanel(id);
+  renderReviewsPanel();
   renderWrStars();
   const wf=document.getElementById('writeReviewForm'); if(wf) wf.classList.add('hidden');
   const wb=document.getElementById('btnWriteReview'); if(wb) wb.textContent='✎ Tulis Ulasan';
@@ -1781,8 +1776,20 @@ function toggleStoreMap(){
 /* ============================================================
    REVIEWS PANEL (kiri) — ringkasan rating + daftar ulasan
    ============================================================ */
-function renderReviewsPanel(storeId){
-  const comments=storeComments[storeId]||[];
+function getAllApprovedComments(){
+  // Gabungan ulasan dari SEMUA cabang menjadi satu daftar (bukan per-cabang lagi),
+  // masing-masing item tetap menyimpan storeId & indeks aslinya untuk keperluan lightbox foto.
+  const combined=[];
+  STORES.forEach(s=>{
+    (storeComments[s.id]||[]).forEach((c,idx)=>{
+      combined.push({...c, storeId:s.id, storeName:s.name, origIdx:idx});
+    });
+  });
+  combined.sort((a,b)=>new Date(b.date)-new Date(a.date));
+  return combined;
+}
+function renderReviewsPanel(){
+  const comments=getAllApprovedComments();
   const rated=comments.filter(c=>c.rating>0);
   const count=rated.length;
   const avg=count?rated.reduce((a,c)=>a+c.rating,0)/count:0;
@@ -1809,7 +1816,6 @@ function renderReviewsPanel(storeId){
   } else {
     const shown=showAllReviews?comments:comments.slice(0,3);
     listEl.innerHTML=shown.map(c=>{
-      const realIdx=comments.indexOf(c);
       const initials=(c.author||'A').trim().slice(0,2).toUpperCase();
       return `<div class="review-item">
         <div class="review-item-head">
@@ -1818,10 +1824,11 @@ function renderReviewsPanel(storeId){
             <div class="review-author">${escHtml(c.author||'Anonim')}</div>
             <div class="review-date">${formatDate(c.date)}</div>
           </div>
+          <div class="review-store-tag">${escHtml(c.storeName||'')}</div>
         </div>
         ${c.rating>0?`<div class="review-stars">${'★'.repeat(c.rating)}${'☆'.repeat(5-c.rating)}</div>`:''}
         ${c.text?`<div class="review-text">"${escHtml(c.text)}"</div>`:''}
-        ${c.photos&&c.photos.length?`<div class="review-photos">${c.photos.map((src,pi)=>`<img class="review-photo-thumb" src="${src}" alt="Foto bukti" onclick="openLightbox('${storeId}',${realIdx},${pi})" />`).join('')}</div>`:''}
+        ${c.photos&&c.photos.length?`<div class="review-photos">${c.photos.map((src,pi)=>`<img class="review-photo-thumb" src="${src}" alt="Foto bukti" onclick="openLightbox('${c.storeId}',${c.origIdx},${pi})" />`).join('')}</div>`:''}
       </div>`;
     }).join('');
   }
@@ -1833,7 +1840,7 @@ function renderReviewsPanel(storeId){
     } else { seeAllBtn.style.display='none'; }
   }
 }
-function toggleAllReviews(){ showAllReviews=!showAllReviews; renderReviewsPanel(activeStoreId); }
+function toggleAllReviews(){ showAllReviews=!showAllReviews; renderReviewsPanel(); }
 
 function toggleWriteReviewForm(){
   const wf=document.getElementById('writeReviewForm');
@@ -2313,7 +2320,7 @@ async function approveReview(storeId,reviewId){
   await loadAllReviews();
   const main=document.getElementById('adminMain');
   if(main) main.innerHTML=renderAdminReviews();
-  if(storeId===activeStoreId) renderReviewsPanel(storeId);
+  renderReviewsPanel();
   showToast('Ulasan disetujui dan kini tampil di halaman toko.');
 }
 async function deleteReview(storeId,reviewId){
@@ -2323,7 +2330,7 @@ async function deleteReview(storeId,reviewId){
   await loadAllReviews();
   const main=document.getElementById('adminMain');
   if(main) main.innerHTML=renderAdminReviews();
-  if(storeId===activeStoreId) renderReviewsPanel(storeId);
+  renderReviewsPanel();
   showToast('Ulasan berhasil dihapus.');
 }
 
