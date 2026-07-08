@@ -204,6 +204,8 @@
     .card-img-wrap img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.5s; }
     .card:hover .card-img-wrap img { transform: scale(1.05); }
     .card-badge { position: absolute; top: 12px; left: 12px; background: var(--black); color: var(--gold); font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; padding: 4px 9px; }
+    .card-stock-tag { position: absolute; bottom: 10px; left: 10px; background: rgba(13,13,13,0.75); color: #fff; font-size: 10px; letter-spacing: 0.05em; padding: 4px 10px; border-radius: 3px; z-index: 2; }
+    .card-stock-tag.low { background: rgba(138,90,0,0.88); }
     .card-body { padding: 16px; }
     .card-brand { font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--gold); margin-bottom: 4px; }
     .card-name { font-family: 'Cormorant Garamond', serif; font-size: 17px; font-weight: 400; color: var(--black); margin-bottom: 4px; line-height: 1.3; }
@@ -645,6 +647,7 @@
       .card-price { font-size: 10px; margin-bottom: 8px; }
       .card-price strong { font-size: 12px; }
       .card-badge { font-size: 7.5px; padding: 3px 6px; top: 8px; left: 8px; }
+      .card-stock-tag { font-size: 8.5px; padding: 3px 7px; bottom: 8px; left: 8px; }
       .card-wishlist-btn { width: 26px; height: 26px; font-size: 13px; top: 6px; right: 6px; }
       .btn-detail { font-size: 8px; letter-spacing: 0.08em; padding: 7px 2px; }
       .btn-card-share { padding: 7px 8px; font-size: 11px; }
@@ -1608,7 +1611,7 @@ function renderCard(p){
   return `<div class="card" onclick="openModal(${p.id})">
     <div class="card-img-wrap">
       <img src="${imgUrl}" alt="${escHtml(p.name)}" loading="lazy" />
-      ${st.key==='out'?`<div class="card-out-overlay">Stok Habis</div>`:''}
+      ${st.key==='out'?`<div class="card-out-overlay">Stok Habis</div>`:`<span class="card-stock-tag ${st.key==='low'?'low':''}">Stok: ${p.stock}</span>`}
       ${p.badge?`<span class="card-badge">${escHtml(p.badge)}</span>`:(st.key==='low'?`<span class="card-badge out-of-stock">Stok Menipis</span>`:'')}
       <button class="card-wishlist-btn ${isWishlisted?'wishlisted':''}" data-wishlist-id="${p.id}" onclick="toggleWishlist(${p.id},event)" title="${isWishlisted?'Hapus dari wishlist':'Tambah ke wishlist'}">${isWishlisted?'♥':'♡'}</button>
     </div>
