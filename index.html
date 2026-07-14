@@ -1166,8 +1166,6 @@ let LIVE_CHAT=[], chatPollTimer=null, chatWidgetOpen=false, adminChatOpenSession
 function getChatSessionId(){let id=localStorage.getItem('hf_chat_session');if(!id){id='cs_'+Date.now()+'_'+Math.random().toString(36).slice(2,9);localStorage.setItem('hf_chat_session',id);}return id;}
 function getChatCustomerName(){return localStorage.getItem('hf_chat_name')||'';}
 function setChatCustomerName(n){localStorage.setItem('hf_chat_name',n);}
-function getN8nWebhookUrl(){return localStorage.getItem('hf_n8n_webhook')||'';}
-function setN8nWebhookUrl(u){localStorage.setItem('hf_n8n_webhook',u);}
 const LOW_STOCK_THRESHOLD=5; // di bawah/sama dengan angka ini dianggap "Stok Menipis"
 
 const CS_WHATSAPP='6281234567890';
@@ -2067,7 +2065,7 @@ function setAdminPage(page){
   else if(page==='stores') main.innerHTML=renderAdminStores();
   else if(page==='reviews') main.innerHTML=renderAdminReviews();
   else if(page==='livechat') { main.innerHTML='<div class="admin-empty" style="padding:40px;">Memuat percakapan...</div>'; loadLiveChat().then(()=>{ if(adminCurrentPage==='livechat') main.innerHTML=renderAdminLiveChat(); }); }
-  else if(page==='aiagent') main.innerHTML=renderAdminAIAgent();
+  else if(page==='aiagent') { main.innerHTML='<div class="admin-empty" style="padding:40px;">Menghitung data penjualan...</div>'; Promise.all([loadStockMovements(),loadLiveChat()]).then(()=>{ if(adminCurrentPage==='aiagent') main.innerHTML=renderAdminAIAgent(); }); }
 }
 
 function renderAdminDashboard(){
@@ -2757,28 +2755,63 @@ async function sendAdminChatMsg(sid){
 }
 
 /* ============================================================
-   AI SALES ANALYST AGENT (n8n)
+   AI SALES ANALYST AGENT — VERSI PURE CODE (TANPA TOOLS/AI EKSTERNAL)
    Deskripsi tugas:
-   Agent ini bertugas MEMBACA data penjualan (dari histori stock_movements
-   tipe "keluar" dikalikan harga produk), MENGANALISIS tren (produk terlaris,
-   stok kritis, performa kategori/cabang), lalu MENYUSUN & MENGIRIM laporan
-   otomatis ke email tim setiap minggu — tanpa campur tangan manual.
-
-   Alur (workflow n8n):
-   Setiap Minggu (Schedule Trigger) -> Ambil Data Penjualan (Supabase/HTTP Request)
-   -> AI Analisis (AI Agent / OpenAI-Claude node) -> Kirim Email (Send Email node)
+   Agent ini bekerja 100% di browser (client-side JavaScript). Tidak ada
+   pemanggilan API/AI/webhook eksternal apa pun (tidak ada n8n, tidak ada
+   OpenAI/Claude API, tidak ada fetch ke server lain). Semua "kecerdasan"
+   berasal dari fungsi JavaScript murni yang:
+   1. MEMBACA data yang sudah ada di memori (PRODUCTS, STOCK_MOVEMENTS,
+      storeComments/reviews, LIVE_CHAT) — hasil query Supabase yang memang
+      sudah dipakai oleh aplikasi ini.
+   2. MENGHITUNG metrik (produk terlaris, tren mingguan, stok kritis,
+      performa brand/kategori/warna, rating ulasan, dsb) lewat computeSalesData().
+   3. MENCOCOKKAN pertanyaan pengguna dengan kata kunci (rule-based matching)
+      lewat answerSalesQuestion(), lalu menyusun jawaban dari angka asli —
+      tidak pernah mengarang data.
+   4. MENYUSUN laporan lengkap lewat generateFullReport(), yang bisa dilihat
+      langsung di halaman ini atau diunduh sebagai file .txt.
    ============================================================ */
 function computeSalesData(){
   const sold=STOCK_MOVEMENTS.filter(m=>m.type==='keluar');
-  const perProduct={};
+  const perProduct={}, perBrand={}, perColor={}, perCategory={};
+  const DAY_NAMES=['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'];
+  const perDay={}; DAY_NAMES.forEach(d=>perDay[d]=0);
+  const now=new Date();
+  const oneWeekAgo=new Date(now.getTime()-7*86400000);
+  const twoWeeksAgo=new Date(now.getTime()-14*86400000);
+  let thisWeekQty=0, prevWeekQty=0;
+
   sold.forEach(m=>{
     const p=PRODUCTS.find(x=>x.id===m.product_id);
     if(!p) return;
     const qty=Math.abs(m.quantity);
+    const rev=qty*p.price;
+
     if(!perProduct[p.id]) perProduct[p.id]={product:p, qty:0, revenue:0};
-    perProduct[p.id].qty+=qty;
-    perProduct[p.id].revenue+=qty*p.price;
+    perProduct[p.id].qty+=qty; perProduct[p.id].revenue+=rev;
+
+    const brandKey=p.brand||'Lainnya';
+    if(!perBrand[brandKey]) perBrand[brandKey]={qty:0,revenue:0};
+    perBrand[brandKey].qty+=qty; perBrand[brandKey].revenue+=rev;
+
+    const colorKey=p.color||'Lainnya';
+    if(!perColor[colorKey]) perColor[colorKey]={qty:0,revenue:0};
+    perColor[colorKey].qty+=qty; perColor[colorKey].revenue+=rev;
+
+    if(!perCategory[p.cat]) perCategory[p.cat]={qty:0,revenue:0};
+    perCategory[p.cat].qty+=qty; perCategory[p.cat].revenue+=rev;
+
+    if(m.created_at){
+      const d=new Date(m.created_at);
+      if(!isNaN(d)){
+        perDay[DAY_NAMES[d.getDay()]]+=qty;
+        if(d>=oneWeekAgo) thisWeekQty+=qty;
+        else if(d>=twoWeeksAgo) prevWeekQty+=qty;
+      }
+    }
   });
+
   const list=Object.values(perProduct).sort((a,b)=>b.qty-a.qty);
   const totalUnitsSold=list.reduce((a,x)=>a+x.qty,0);
   const totalRevenue=list.reduce((a,x)=>a+x.revenue,0);
@@ -2786,22 +2819,109 @@ function computeSalesData(){
   const worstSeller=list.length?list[list.length-1]:null;
   const lowStock=PRODUCTS.filter(p=>stockStatus(p.stock).key==='low');
   const outStock=PRODUCTS.filter(p=>stockStatus(p.stock).key==='out');
-  const perCategory={};
-  list.forEach(x=>{const cid=x.product.cat;if(!perCategory[cid])perCategory[cid]={qty:0,revenue:0};perCategory[cid].qty+=x.qty;perCategory[cid].revenue+=x.revenue;});
-  return {list,totalUnitsSold,totalRevenue,bestSeller,worstSeller,lowStock,outStock,perCategory,sold};
+  const totalStockRemaining=PRODUCTS.reduce((a,p)=>a+(p.stock||0),0);
+
+  const brandList=Object.entries(perBrand).map(([brand,v])=>({brand,...v})).sort((a,b)=>b.qty-a.qty);
+  const colorList=Object.entries(perColor).map(([color,v])=>({color,...v})).sort((a,b)=>b.qty-a.qty);
+  const categoryList=Object.entries(perCategory).map(([cat,v])=>{
+    const c=CATEGORIES.find(x=>x.id===cat);
+    return {cat, label:c?c.label:cat, ...v};
+  }).sort((a,b)=>b.qty-a.qty);
+
+  const busiestDayEntry=Object.entries(perDay).sort((a,b)=>b[1]-a[1])[0];
+  const busiestDay=busiestDayEntry&&busiestDayEntry[1]>0?{day:busiestDayEntry[0],qty:busiestDayEntry[1]}:null;
+  const trendDeltaPct=prevWeekQty>0?Math.round(((thisWeekQty-prevWeekQty)/prevWeekQty)*100):(thisWeekQty>0?100:0);
+
+  let totalReviews=0, ratingSum=0, negativeKeywordHits={};
+  const NEGATIVE_WORDS=['lambat','lama','rusak','cacat','kecewa','mahal','sobek','luntur','bau','salah','kurang','tipis','bocor','pudar'];
+  (typeof STORES!=='undefined'?STORES:[]).forEach(s=>{
+    (storeComments[s.id]||[]).forEach(r=>{
+      totalReviews++; ratingSum+=(r.rating||0);
+      const t=(r.text||'').toLowerCase();
+      NEGATIVE_WORDS.forEach(w=>{ if(t.includes(w)) negativeKeywordHits[w]=(negativeKeywordHits[w]||0)+1; });
+    });
+  });
+  const avgRating=totalReviews?(ratingSum/totalReviews):0;
+  const topComplaint=Object.entries(negativeKeywordHits).sort((a,b)=>b[1]-a[1])[0]||null;
+
+  const oneWeekAgoChat=new Date(now.getTime()-7*86400000);
+  const chatSessionsThisWeek=new Set();
+  (typeof LIVE_CHAT!=='undefined'?LIVE_CHAT:[]).forEach(m=>{
+    if(m.sender==='customer' && m.created_at){
+      const d=new Date(m.created_at);
+      if(!isNaN(d) && d>=oneWeekAgoChat) chatSessionsThisWeek.add(m.session_id);
+    }
+  });
+
+  return {list,totalUnitsSold,totalRevenue,bestSeller,worstSeller,lowStock,outStock,totalStockRemaining,
+    brandList,colorList,categoryList,perDay,busiestDay,thisWeekQty,prevWeekQty,trendDeltaPct,
+    totalReviews,avgRating,topComplaint,chatSessionsThisWeekCount:chatSessionsThisWeek.size,sold};
 }
-const AI_SYSTEM_PROMPT = `Anda adalah "AI Sales Analyst" untuk toko fashion HarmoniFashion.
-Tugas Anda:
-1. Baca data penjualan mingguan (JSON) yang dikirim dari Supabase berisi: daftar transaksi keluar stok, harga produk, kategori, dan cabang.
-2. Hitung: total unit terjual, total estimasi omzet, produk terlaris & tersepi, kategori paling laku, status stok kritis.
-3. Bandingkan dengan minggu sebelumnya (jika data tersedia) untuk melihat tren naik/turun.
-4. Susun laporan singkat dalam Bahasa Indonesia dengan format:
-   - Ringkasan Eksekutif (2-3 kalimat)
-   - Produk Terlaris (top 5)
-   - Produk Perlu Perhatian (stok menipis/habis, atau penjualan turun tajam)
-   - Rekomendasi Tindakan (restock, promo, diskon, dsb.)
-5. Jangan mengarang angka — hanya gunakan data yang diberikan.
-Keluaran akhir harus siap ditempel ke isi email, dengan subjek: "Laporan Penjualan Mingguan HarmoniFashion - {tanggal}".`;
+
+/* Menyusun laporan lengkap dari data lokal — murni JavaScript, tanpa AI/API */
+function generateFullReport(){
+  const sd=computeSalesData();
+  const tanggal=new Date().toLocaleDateString('id-ID',{day:'numeric',month:'long',year:'numeric'});
+  const lines=[];
+  lines.push(`LAPORAN PENJUALAN — HarmoniFashion`);
+  lines.push(`Dibuat otomatis (lokal, di browser): ${tanggal}`);
+  lines.push('');
+  lines.push('== RINGKASAN EKSEKUTIF ==');
+  lines.push(`Total unit terjual (tercatat): ${sd.totalUnitsSold} unit, estimasi omzet ${formatRupiah(sd.totalRevenue)}.`);
+  lines.push(`Tren minggu ini vs minggu lalu: ${sd.thisWeekQty} vs ${sd.prevWeekQty} unit (${sd.trendDeltaPct>=0?'+':''}${sd.trendDeltaPct}%).`);
+  lines.push(`Sisa stok di seluruh produk: ${sd.totalStockRemaining} unit. Stok menipis: ${sd.lowStock.length} produk, stok habis: ${sd.outStock.length} produk.`);
+  lines.push('');
+  lines.push('== PRODUK TERLARIS (TOP 5) ==');
+  if(sd.list.length){
+    sd.list.slice(0,5).forEach((x,i)=>lines.push(`${i+1}. ${x.product.name} (${x.product.brand}) — ${x.qty} unit, ${formatRupiah(x.revenue)}`));
+  } else lines.push('Belum ada data penjualan (stok keluar) yang tercatat.');
+  lines.push('');
+  lines.push('== PERFORMA KATEGORI & BRAND ==');
+  if(sd.categoryList.length) lines.push(`Kategori terlaku: ${sd.categoryList[0].label} (${sd.categoryList[0].qty} unit).`);
+  if(sd.brandList.length) lines.push(`Brand kontributor omzet terbesar: ${sd.brandList[0].brand} (${formatRupiah(sd.brandList[0].revenue)}).`);
+  if(sd.colorList.length) lines.push(`Warna paling diminati: ${sd.colorList[0].color} (${sd.colorList[0].qty} unit).`);
+  if(sd.busiestDay) lines.push(`Hari paling ramai transaksi: ${sd.busiestDay.day} (${sd.busiestDay.qty} unit).`);
+  lines.push('');
+  lines.push('== PRODUK PERLU PERHATIAN ==');
+  if(sd.outStock.length) lines.push(`Stok HABIS: ${sd.outStock.map(p=>p.name).join(', ')}.`);
+  if(sd.lowStock.length) lines.push(`Stok MENIPIS: ${sd.lowStock.map(p=>`${p.name} (${p.stock})`).join(', ')}.`);
+  if(!sd.outStock.length && !sd.lowStock.length) lines.push('Tidak ada produk dengan stok kritis saat ini. 👍');
+  lines.push('');
+  lines.push('== ULASAN PELANGGAN ==');
+  lines.push(`Rating rata-rata: ${sd.totalReviews?sd.avgRating.toFixed(1):'-'} dari ${sd.totalReviews} ulasan.`);
+  lines.push(`Keluhan yang paling sering muncul: ${sd.topComplaint?`kata "${sd.topComplaint[0]}" (${sd.topComplaint[1]}x)`:'tidak ada pola keluhan yang menonjol'}.`);
+  lines.push('');
+  lines.push('== REKOMENDASI TINDAKAN ==');
+  const rekom=[];
+  if(sd.bestSeller) rekom.push(`Perkuat stok & promosikan "${sd.bestSeller.product.name}" karena paling laris.`);
+  if(sd.outStock.length||sd.lowStock.length) rekom.push(`Segera restock ${sd.outStock.length+sd.lowStock.length} produk yang menipis/habis agar tidak kehilangan potensi penjualan.`);
+  if(sd.trendDeltaPct<0) rekom.push(`Tren penjualan turun ${Math.abs(sd.trendDeltaPct)}% — pertimbangkan promo/diskon minggu ini.`);
+  if(sd.trendDeltaPct>0) rekom.push(`Tren penjualan naik ${sd.trendDeltaPct}% — pastikan stok cukup agar momentum tidak terhenti.`);
+  if(!rekom.length) rekom.push('Belum cukup data transaksi untuk rekomendasi spesifik. Terus catat setiap transaksi stok keluar.');
+  rekom.forEach(r=>lines.push(`- ${r}`));
+  lines.push('');
+  lines.push('(Laporan ini dihasilkan sepenuhnya oleh logic JavaScript lokal, langsung dari data yang tersimpan di aplikasi — tanpa memanggil AI atau layanan pihak ketiga mana pun.)');
+  return lines.join('\n');
+}
+
+function showFullReport(){
+  const box=document.getElementById('aiReportBox');
+  if(!box) return;
+  box.textContent=generateFullReport();
+  box.style.display='block';
+  box.scrollIntoView({behavior:'smooth',block:'nearest'});
+  showToast('Laporan berhasil dibuat secara lokal (tanpa AI/API eksternal).');
+}
+function downloadFullReport(){
+  const text=generateFullReport();
+  const blob=new Blob([text],{type:'text/plain;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download=`laporan-penjualan-harmonifashion-${new Date().toISOString().slice(0,10)}.txt`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  showToast('Laporan diunduh sebagai file .txt.');
+}
 
 const AI_SAMPLE_QUESTIONS = [
   {cat:'Performa Penjualan', q:'Berapa total penjualan minggu ini?'},
@@ -2835,69 +2955,59 @@ const AI_SAMPLE_QUESTIONS = [
 
 function renderAdminAIAgent(){
   const sd=computeSalesData();
-  const webhook=getN8nWebhookUrl();
-  return `<div class="admin-header"><div><h1 class="admin-page-title">AI Sales <em>Analyst Agent</em></h1><p class="admin-page-sub">Agent otomatis (dijalankan via n8n) yang membaca data penjualan, menganalisis tren, lalu mengirim laporan ke email tim setiap minggu.</p></div></div>
+  return `<div class="admin-header"><div><h1 class="admin-page-title">AI Sales <em>Analyst Agent</em></h1><p class="admin-page-sub">Analisis penjualan otomatis yang berjalan 100% sebagai kode JavaScript di browser — tanpa n8n, tanpa API AI eksternal, tanpa webhook.</p></div></div>
 
     <div class="admin-panel">
       <div class="admin-panel-title">1. Deskripsi Tugas & Fungsi</div>
       <p style="font-size:13px;line-height:1.7;color:var(--mid);">
-        <strong>AI Sales Analyst Agent</strong> adalah automasi berbasis <strong>n8n</strong> yang bekerja di belakang layar tanpa perlu dijalankan manual oleh admin. Fungsinya:
+        <strong>AI Sales Analyst Agent</strong> versi ini adalah <strong>kode murni (pure code)</strong> — bukan automasi eksternal. Semua logika berjalan langsung di aplikasi ini menggunakan fungsi JavaScript. Fungsinya:
       </p>
       <ul style="font-size:13px;line-height:1.9;color:var(--mid);padding-left:20px;margin-top:8px;">
-        <li><strong>Membaca data penjualan</strong> — mengambil histori transaksi (stok keluar) dan harga produk langsung dari database Supabase toko.</li>
-        <li><strong>Menganalisis data</strong> — AI (model bahasa) menghitung produk terlaris, tren naik/turun, kategori paling laku, dan status stok kritis.</li>
-        <li><strong>Membuat laporan otomatis</strong> — hasil analisis disusun menjadi laporan rapi berbahasa Indonesia.</li>
-        <li><strong>Mengirim laporan ke email</strong> — laporan dikirim otomatis ke email pemilik/tim setiap minggu (bisa diatur harian/bulanan).</li>
+        <li><strong>Membaca data penjualan</strong> — mengambil histori transaksi (stok keluar), harga, kategori, brand, dan warna produk yang sudah dimuat dari Supabase ke memori aplikasi.</li>
+        <li><strong>Menghitung metrik</strong> — fungsi <code>computeSalesData()</code> menghitung produk terlaris, tren mingguan, performa kategori/brand/warna, hari paling ramai, dan status stok kritis dengan operasi matematika biasa (tanpa model AI).</li>
+        <li><strong>Menjawab pertanyaan</strong> — fungsi <code>answerSalesQuestion()</code> mencocokkan kata kunci pada pertanyaan dan menyusun jawaban langsung dari angka hasil perhitungan di atas.</li>
+        <li><strong>Menyusun laporan</strong> — fungsi <code>generateFullReport()</code> merangkai semua metrik menjadi laporan teks yang bisa dilihat atau diunduh sebagai file <code>.txt</code>.</li>
       </ul>
     </div>
 
     <div class="admin-panel">
-      <div class="admin-panel-title">2. Cara Kerja / Alur Workflow (n8n)</div>
+      <div class="admin-panel-title">2. Alur Kerja Kode (Logic Engine)</div>
       <div class="ai-flow">
-        <div class="ai-flow-step"><strong>⏰ Setiap Minggu</strong>Schedule Trigger n8n (mis. tiap Senin 07:00)</div>
+        <div class="ai-flow-step"><strong>📥 Baca Data</strong>PRODUCTS, STOCK_MOVEMENTS & ulasan yang sudah ada di memori</div>
         <div class="ai-flow-arrow">→</div>
-        <div class="ai-flow-step"><strong>📥 Ambil Data Penjualan</strong>Node Supabase / HTTP Request ke tabel stock_movements & products</div>
+        <div class="ai-flow-step"><strong>🧮 Hitung Metrik</strong>computeSalesData() — agregasi & tren, murni JavaScript</div>
         <div class="ai-flow-arrow">→</div>
-        <div class="ai-flow-step"><strong>🤖 AI Analisis</strong>Node AI Agent membaca data & menyusun insight sesuai system prompt</div>
+        <div class="ai-flow-step"><strong>🔎 Cocokkan Pertanyaan</strong>answerSalesQuestion() — pencocokan kata kunci</div>
         <div class="ai-flow-arrow">→</div>
-        <div class="ai-flow-step"><strong>📧 Kirim Email</strong>Node Send Email (Gmail/SMTP) ke tim penjualan</div>
+        <div class="ai-flow-step"><strong>📝 Tampilkan Jawaban / Laporan</strong>Langsung dirender ke halaman ini</div>
       </div>
-      <p style="font-size:12px;color:#888;">Rincian teknis: (1) Schedule Trigger memicu workflow tiap minggu. (2) Node Supabase mengambil seluruh baris <code>stock_movements</code> tipe "keluar" 7 hari terakhir + join data produk. (3) Data JSON dikirim ke node AI Agent bersama system prompt di bawah. (4) Output teks laporan dari AI dimasukkan ke body email pada node Send Email, lalu dikirim ke alamat email admin/tim.</p>
+      <p style="font-size:12px;color:#888;">Tidak ada langkah yang meninggalkan browser: tidak ada <code>fetch()</code> ke server AI, tidak ada Schedule Trigger, tidak ada Send Email node. Untuk mengirim laporan, admin cukup mengunduh file .txt yang dihasilkan lalu melampirkannya secara manual.</p>
     </div>
 
     <div class="admin-panel">
-      <div class="admin-panel-title">3. System Prompt untuk Node AI di n8n</div>
-      <div class="ai-prompt-box">${escHtml(AI_SYSTEM_PROMPT)}</div>
-      <p style="font-size:11px;color:#999;margin-top:8px;">Salin teks di atas ke kolom "System Prompt" pada node AI Agent / OpenAI / Claude di n8n.</p>
-    </div>
-
-    <div class="admin-panel">
-      <div class="admin-panel-title">4. Hubungkan ke Webhook n8n</div>
-      <p style="font-size:12px;color:#888;margin-bottom:10px;">Masukkan Webhook URL dari node "Webhook" di n8n (trigger manual/testing). Tombol di bawah akan mengirim ringkasan data penjualan toko ke webhook tersebut secara real-time.</p>
-      <div class="admin-form-grid">
-        <div class="admin-field" style="flex:1;"><label>n8n Webhook URL</label><input type="text" id="n8nWebhookInput" value="${escHtml(webhook)}" placeholder="https://your-n8n-instance.com/webhook/sales-analyst" /></div>
-      </div>
-      <button class="btn-admin-action gold" onclick="saveN8nWebhook()">Simpan Webhook</button>
-      <button class="btn-admin-action" onclick="triggerN8nAnalysis()">🚀 Jalankan Analisis Sekarang</button>
-      <div style="margin-top:14px;font-size:12px;color:#888;">
-        <strong>Ringkasan data yang akan dikirim:</strong>
+      <div class="admin-panel-title">3. Ringkasan Data Saat Ini & Buat Laporan</div>
+      <p style="font-size:12px;color:#888;margin-bottom:10px;">Angka di bawah dihitung ulang setiap kali halaman ini dibuka, langsung dari data toko.</p>
+      <div style="font-size:12px;color:#888;margin-bottom:14px;">
         Total unit terjual: <strong>${sd.totalUnitsSold}</strong> ·
         Estimasi omzet: <strong>${formatRupiah(sd.totalRevenue)}</strong> ·
         Terlaris: <strong>${sd.bestSeller?escHtml(sd.bestSeller.product.name):'-'}</strong> ·
         Stok menipis: <strong>${sd.lowStock.length}</strong> · Stok habis: <strong>${sd.outStock.length}</strong>
       </div>
+      <button class="btn-admin-action gold" onclick="showFullReport()">🧮 Buat Laporan Lengkap (Lokal)</button>
+      <button class="btn-admin-action" onclick="downloadFullReport()">⬇️ Unduh Laporan (.txt)</button>
+      <pre class="ai-prompt-box" id="aiReportBox" style="display:none;margin-top:14px;"></pre>
     </div>
 
     <div class="admin-panel">
-      <div class="admin-panel-title">5. Contoh Pertanyaan yang Bisa Dijawab AI Sales Analyst (min. 25 pertanyaan)</div>
+      <div class="admin-panel-title">4. Contoh Pertanyaan yang Bisa Dijawab AI Sales Analyst (min. 25 pertanyaan)</div>
       <div class="ai-qa-grid">${AI_SAMPLE_QUESTIONS.map(item=>`<div class="ai-qa-card"><b>${escHtml(item.cat)}</b>${escHtml(item.q)}</div>`).join('')}</div>
     </div>
 
     <div class="admin-panel">
-      <div class="admin-panel-title">6. Coba Tanya Langsung ke AI Sales Analyst</div>
-      <p style="font-size:12px;color:#888;margin-bottom:10px;">Demo ringan: pertanyaan seputar data toko dijawab langsung dari data Supabase. Untuk analisis mendalam berbasis AI penuh, hubungkan Webhook n8n di atas.</p>
+      <div class="admin-panel-title">5. Coba Tanya Langsung ke AI Sales Analyst</div>
+      <p style="font-size:12px;color:#888;margin-bottom:10px;">Semua jawaban di bawah dihitung langsung dari data toko secara real-time menggunakan logic JavaScript lokal — tanpa AI atau API eksternal.</p>
       <div class="ai-chat-box">
-        <div class="ai-chat-messages" id="aiChatMessages"><div class="ai-chat-msg bot">Halo! Saya AI Sales Analyst. Coba tanya, misalnya: "produk apa yang paling laris minggu ini?"</div></div>
+        <div class="ai-chat-messages" id="aiChatMessages"><div class="ai-chat-msg bot">Halo! Saya AI Sales Analyst (versi pure code). Coba tanya, misalnya: "produk apa yang paling laris minggu ini?"</div></div>
         <div style="padding:8px 12px;border-top:1px solid #e8e3dc;">${AI_SAMPLE_QUESTIONS.slice(0,6).map(item=>`<button class="ai-suggest-chip" onclick="askAiSalesAnalyst(\`${item.q.replace(/`/g,"'")}\`)">${escHtml(item.q)}</button>`).join('')}</div>
         <div class="ai-chat-input-row">
           <input type="text" id="aiChatInput" placeholder="Tulis pertanyaan Anda..." onkeydown="if(event.key==='Enter')askAiSalesAnalyst()" />
@@ -2906,33 +3016,7 @@ function renderAdminAIAgent(){
       </div>
     </div>`;
 }
-function saveN8nWebhook(){
-  const val=document.getElementById('n8nWebhookInput').value.trim();
-  setN8nWebhookUrl(val);
-  showToast(val?'Webhook n8n tersimpan.':'Webhook dikosongkan.');
-}
-async function triggerN8nAnalysis(){
-  const url=getN8nWebhookUrl();
-  if(!url){ showToast('Isi & simpan Webhook URL n8n terlebih dahulu.',true); return; }
-  const sd=computeSalesData();
-  const payload={
-    triggered_at:new Date().toISOString(),
-    total_units_sold:sd.totalUnitsSold,
-    total_revenue:sd.totalRevenue,
-    best_seller: sd.bestSeller?{name:sd.bestSeller.product.name,brand:sd.bestSeller.product.brand,qty:sd.bestSeller.qty,revenue:sd.bestSeller.revenue}:null,
-    products_low_stock: sd.lowStock.map(p=>({name:p.name,brand:p.brand,stock:p.stock})),
-    products_out_of_stock: sd.outStock.map(p=>({name:p.name,brand:p.brand})),
-    per_product: sd.list.map(x=>({name:x.product.name,brand:x.product.brand,qty:x.qty,revenue:x.revenue})),
-    system_prompt: AI_SYSTEM_PROMPT
-  };
-  try{
-    const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    showToast(res.ok?'Data terkirim ke n8n! Cek workflow & email laporan.':'Webhook merespons dengan error.',!res.ok);
-  }catch(err){
-    showToast('Gagal menghubungi webhook n8n. Periksa URL/CORS.',true);
-  }
-}
-async function askAiSalesAnalyst(preset){
+function askAiSalesAnalyst(preset){
   const input=document.getElementById('aiChatInput');
   const q=(preset!==undefined?preset:input.value).trim();
   if(!q) return;
@@ -2940,46 +3024,94 @@ async function askAiSalesAnalyst(preset){
   const box=document.getElementById('aiChatMessages');
   box.innerHTML+=`<div class="ai-chat-msg user">${escHtml(q)}</div>`;
   box.scrollTop=box.scrollHeight;
-  const answer=await answerSalesQuestion(q);
+  const answer=answerSalesQuestion(q);
   box.innerHTML+=`<div class="ai-chat-msg bot">${answer}</div>`;
   box.scrollTop=box.scrollHeight;
 }
-async function answerSalesQuestion(q){
+/* Jawaban 100% dihitung dari data lokal (pure code, rule-based) — tidak ada pemanggilan AI/API eksternal */
+function answerSalesQuestion(q){
   const sd=computeSalesData();
   const ql=q.toLowerCase();
-  const webhook=getN8nWebhookUrl();
-  if(webhook){
-    try{
-      const res=await fetch(webhook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,sales_data:sd.list.map(x=>({name:x.product.name,qty:x.qty,revenue:x.revenue})),system_prompt:AI_SYSTEM_PROMPT})});
-      if(res.ok){ const data=await res.json().catch(()=>null); if(data && (data.answer||data.output||data.text)) return escHtml(data.answer||data.output||data.text); }
-    }catch(e){ /* fallback ke jawaban lokal di bawah */ }
-  }
+
   if(ql.includes('terlaris')||ql.includes('paling laris')||ql.includes('paling laku')){
     return sd.bestSeller?`Produk terlaris saat ini: <strong>${escHtml(sd.bestSeller.product.name)}</strong> (${escHtml(sd.bestSeller.product.brand)}) — ${sd.bestSeller.qty} unit terjual, estimasi omzet ${formatRupiah(sd.bestSeller.revenue)}.`:'Belum ada data penjualan (stok keluar) yang tercatat.';
   }
   if(ql.includes('sepi')||ql.includes('jarang')||ql.includes('kurang laku')){
     return sd.worstSeller?`Produk dengan penjualan paling rendah: <strong>${escHtml(sd.worstSeller.product.name)}</strong> — hanya ${sd.worstSeller.qty} unit terjual.`:'Belum ada cukup data untuk menilai produk kurang laku.';
   }
-  if(ql.includes('stok menipis')||ql.includes('stok tipis')||ql.includes('restock')){
+  if(ql.includes('tren')&&(ql.includes('dibanding')||ql.includes('minggu lalu'))){
+    return `Minggu ini terjual ${sd.thisWeekQty} unit, minggu lalu ${sd.prevWeekQty} unit — ${sd.trendDeltaPct>=0?'naik':'turun'} <strong>${Math.abs(sd.trendDeltaPct)}%</strong>.`;
+  }
+  if(ql.includes('hari apa')||ql.includes('paling ramai')){
+    return sd.busiestDay?`Hari dengan penjualan paling ramai: <strong>${sd.busiestDay.day}</strong> (${sd.busiestDay.qty} unit).`:'Belum cukup data transaksi untuk menentukan hari paling ramai.';
+  }
+  if(ql.includes('brand')&&(ql.includes('kontribusi')||ql.includes('banyak')||ql.includes('omzet'))){
+    return sd.brandList.length?`Brand dengan kontribusi omzet terbesar: <strong>${escHtml(sd.brandList[0].brand)}</strong> — ${formatRupiah(sd.brandList[0].revenue)} dari ${sd.brandList[0].qty} unit.`:'Belum ada data penjualan per brand.';
+  }
+  if(ql.includes('kategori')&&(ql.includes('laku')||ql.includes('paling'))){
+    return sd.categoryList.length?`Kategori paling laku: <strong>${escHtml(sd.categoryList[0].label)}</strong> — ${sd.categoryList[0].qty} unit terjual.`:'Belum ada data penjualan per kategori.';
+  }
+  if(ql.includes('warna')&&(ql.includes('diminati')||ql.includes('laku')||ql.includes('paling'))){
+    return sd.colorList.length?`Warna paling diminati: <strong>${escHtml(sd.colorList[0].color)}</strong> — ${sd.colorList[0].qty} unit terjual.`:'Belum ada data penjualan per warna.';
+  }
+  if(ql.includes('stok menipis')||ql.includes('stok tipis')){
     return sd.lowStock.length?`Produk stok menipis: ${sd.lowStock.map(p=>escHtml(p.name)+' ('+p.stock+')').join(', ')}.`:'Tidak ada produk dengan stok menipis saat ini. 👍';
   }
   if(ql.includes('habis')){
     return sd.outStock.length?`Produk stok habis: ${sd.outStock.map(p=>escHtml(p.name)).join(', ')}. Segera lakukan restock.`:'Tidak ada produk yang stoknya habis saat ini.';
   }
+  if(ql.includes('restock')||ql.includes('segera')){
+    const items=[...sd.outStock,...sd.lowStock];
+    return items.length?`Produk yang perlu segera di-restock: ${items.map(p=>escHtml(p.name)).join(', ')}.`:'Belum ada produk yang perlu di-restock saat ini.';
+  }
+  if(ql.includes('risiko')&&ql.includes('kehabisan')){
+    const risk=sd.lowStock.length+sd.outStock.length;
+    return risk?`Ada <strong>${risk} produk</strong> berisiko kehabisan stok (${sd.outStock.length} sudah habis, ${sd.lowStock.length} menipis). Segera lakukan restock, terutama produk terlaris.`:'Risiko kehabisan stok saat ini rendah — tidak ada produk menipis/habis.';
+  }
+  if(ql.includes('total unit stok')||ql.includes('stok yang tersisa')||ql.includes('sisa stok')){
+    return `Total unit stok yang tersisa di seluruh produk: <strong>${sd.totalStockRemaining} unit</strong>.`;
+  }
+  if(ql.includes('cabang')){
+    return `Transaksi penjualan (stok keluar) pada versi ini belum ditautkan ke cabang tertentu, jadi perbandingan performa cabang berbasis omzet belum bisa dihitung otomatis. Yang tersedia dari data lokal: rata-rata rating ulasan pelanggan sebesar ${sd.totalReviews?sd.avgRating.toFixed(1):'-'} dari ${sd.totalReviews} ulasan (semua cabang).`;
+  }
   if(ql.includes('omzet')||ql.includes('total penjualan')||ql.includes('pendapatan')){
     return `Total unit terjual: <strong>${sd.totalUnitsSold}</strong>, estimasi total omzet: <strong>${formatRupiah(sd.totalRevenue)}</strong> (berdasarkan histori stok keluar yang tercatat).`;
   }
-  if(ql.includes('cabang')){
-    return `Data performa per cabang belum terhubung langsung ke transaksi penjualan pada versi ini. Hubungkan Webhook n8n dengan sumber data kasir/POS per cabang agar AI bisa membandingkan cabang secara akurat.`;
+  if(ql.includes('tren')&&(ql.includes('berikutnya')||ql.includes('potensi'))){
+    const rising=sd.list.slice(1,4).map(x=>escHtml(x.product.name)).join(', ');
+    return rising?`Berdasarkan volume penjualan saat ini, produk dengan potensi tren berikutnya (di luar produk terlaris): ${rising}.`:'Belum cukup data untuk memprediksi tren produk berikutnya.';
   }
-  if(ql.includes('rekomendasi')||ql.includes('promo')||ql.includes('prediksi')||ql.includes('tren')){
+  if(ql.includes('perkiraan')||(ql.includes('bulan depan')&&ql.includes('penjualan'))){
+    const proyeksi=Math.max(0,Math.round(sd.thisWeekQty*(1+sd.trendDeltaPct/100)*4));
+    return `Proyeksi sederhana (linear dari tren mingguan saat ini): sekitar <strong>${proyeksi} unit</strong> bulan depan. Ini estimasi kasar berbasis data historis, bukan prediksi statistik lanjutan.`;
+  }
+  if(ql.includes('liburan')||ql.includes('musim')){
+    const items=[...sd.outStock,...sd.lowStock];
+    return `Untuk musim liburan, disarankan menambah stok pada produk terlaris (${sd.bestSeller?escHtml(sd.bestSeller.product.name):'-'}) dan ${items.length} produk yang saat ini menipis/habis, agar tidak kehabisan saat permintaan naik.`;
+  }
+  if(ql.includes('rekomendasi')||ql.includes('promo')||ql.includes('prediksi')){
     const top=sd.list.slice(0,3).map(x=>escHtml(x.product.name)).join(', ');
     return `Rekomendasi: fokuskan promo pada produk terlaris (${top||'belum ada data'}) dan segera restock produk yang stoknya menipis/habis agar tidak kehilangan potensi penjualan.`;
   }
-  if(ql.includes('laporan')||ql.includes('kirim') && ql.includes('email')){
-    return `Untuk mengirim laporan lengkap ke email, isi Webhook n8n di atas lalu klik "🚀 Jalankan Analisis Sekarang", atau tunggu jadwal mingguan otomatis dari n8n.`;
+  if(ql.includes('rating')||(ql.includes('ulasan')&&!ql.includes('keluhan'))){
+    return sd.totalReviews?`Rating rata-rata ulasan pelanggan saat ini: <strong>${sd.avgRating.toFixed(1)}</strong> dari ${sd.totalReviews} ulasan.`:'Belum ada ulasan pelanggan yang tercatat.';
   }
-  return `Saya belum punya jawaban spesifik untuk itu dari data lokal. Hubungkan Webhook n8n agar pertanyaan ini diteruskan ke AI Agent penuh untuk analisis lebih mendalam.`;
+  if(ql.includes('keluhan')){
+    return sd.topComplaint?`Keluhan yang paling sering muncul pada ulasan: kata kunci "<strong>${escHtml(sd.topComplaint[0])}</strong>" (muncul ${sd.topComplaint[1]}x).`:'Belum terdeteksi pola keluhan yang menonjol dari ulasan yang ada.';
+  }
+  if(ql.includes('pelanggan baru')||ql.includes('chat')){
+    return `Jumlah sesi live chat pelanggan dalam 7 hari terakhir: <strong>${sd.chatSessionsThisWeekCount}</strong> sesi.`;
+  }
+  if(ql.includes('ringkasan')&&ql.includes('laporan')){
+    return `Ringkasan: ${sd.totalUnitsSold} unit terjual (${formatRupiah(sd.totalRevenue)}), terlaris "${sd.bestSeller?escHtml(sd.bestSeller.product.name):'-'}", ${sd.lowStock.length+sd.outStock.length} produk perlu restock. Klik tombol "🧮 Buat Laporan Lengkap (Lokal)" di atas untuk laporan lengkapnya.`;
+  }
+  if(ql.includes('kirim')&&ql.includes('email')){
+    return `Versi ini murni kode lokal dan tidak terhubung ke layanan pengiriman email apa pun. Silakan klik "⬇️ Unduh Laporan (.txt)" di atas, lalu lampirkan filenya secara manual ke email tim.`;
+  }
+  if(ql.includes('bandingkan')&&ql.includes('laporan')){
+    return `Perbandingan sederhana: minggu ini ${sd.thisWeekQty} unit vs minggu lalu ${sd.prevWeekQty} unit (${sd.trendDeltaPct>=0?'+':''}${sd.trendDeltaPct}%). Untuk perbandingan bulanan penuh, gunakan tombol "🧮 Buat Laporan Lengkap (Lokal)".`;
+  }
+  return `Saya belum punya jawaban spesifik untuk itu dari data lokal. Coba tanyakan seputar produk terlaris, stok, brand/kategori/warna, tren mingguan, ulasan, atau minta "buatkan ringkasan laporan penjualan mingguan".`;
 }
 
 /* ============================================================
