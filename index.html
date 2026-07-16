@@ -1079,8 +1079,14 @@
   </div>
   <div class="chat-context-tag" id="chatContextTag" style="display:none;"></div>
   <div id="chatNameGate" class="chat-name-gate" style="display:none;">
-    <label style="font-size:12px;color:#666;">Siapa nama Anda, agar admin bisa membalas dengan tepat?</label>
-    <input type="text" id="chatNameInput" placeholder="Nama Anda" />
+    <label style="font-size:12px;color:#666;">Mohon lengkapi data berikut agar admin bisa membalas dengan tepat:</label>
+    <label style="font-size:11px;color:#999;margin-top:4px;">Nama Lengkap</label>
+    <input type="text" id="chatNameInput" placeholder="cth. Siti Aminah" />
+    <label style="font-size:11px;color:#999;margin-top:4px;">Alamat Lengkap</label>
+    <input type="text" id="chatAddressInput" placeholder="cth. Jl. Melati No. 12, Jakarta" />
+    <label style="font-size:11px;color:#999;margin-top:4px;">Email</label>
+    <input type="email" id="chatEmailInput" placeholder="cth. nama@email.com" />
+    <p class="chat-gate-error" id="chatGateError" style="display:none;color:#e53935;font-size:11px;margin-top:2px;"></p>
     <button onclick="submitChatName()">Mulai Chat</button>
   </div>
   <div class="chat-messages" id="chatMessages"></div>
@@ -1165,7 +1171,11 @@ let STOCK_MOVEMENTS=[], adminStockFilter='all', adminStockOpenId=null;
 let LIVE_CHAT=[], chatPollTimer=null, chatWidgetOpen=false, adminChatOpenSession=null, chatContextProduct=null;
 function getChatSessionId(){let id=localStorage.getItem('hf_chat_session');if(!id){id='cs_'+Date.now()+'_'+Math.random().toString(36).slice(2,9);localStorage.setItem('hf_chat_session',id);}return id;}
 function getChatCustomerName(){return localStorage.getItem('hf_chat_name')||'';}
+function getChatCustomerAddress(){return localStorage.getItem('hf_chat_address')||'';}
+function getChatCustomerEmail(){return localStorage.getItem('hf_chat_email')||'';}
 function setChatCustomerName(n){localStorage.setItem('hf_chat_name',n);}
+function setChatCustomerData(n,a,e){localStorage.setItem('hf_chat_name',n);localStorage.setItem('hf_chat_address',a);localStorage.setItem('hf_chat_email',e);}
+function hasChatCustomerData(){return !!(getChatCustomerName() && getChatCustomerAddress() && getChatCustomerEmail());}
 const LOW_STOCK_THRESHOLD=5; // di bawah/sama dengan angka ini dianggap "Stok Menipis"
 
 const CS_WHATSAPP='6281234567890';
@@ -2603,7 +2613,8 @@ async function deleteReview(storeId,reviewId){
    LIVE CHAT — CUSTOMER SIDE
    Tabel Supabase yang dibutuhkan: live_chat_messages
    kolom: id (int8, pk, identity), session_id (text), product_id (int8, null),
-          product_name (text, null), customer_name (text), sender (text: 'customer'/'admin'),
+          product_name (text, null), customer_name (text), customer_address (text),
+          customer_email (text), sender (text: 'customer'/'admin'),
           message (text), created_at (timestamptz default now()), is_read (bool default false)
    ============================================================ */
 function toggleChatPanel(force){
@@ -2613,10 +2624,15 @@ function toggleChatPanel(force){
   chatWidgetOpen = willOpen;
   if(willOpen){
     document.getElementById('chatFabBadge').classList.remove('show');
-    const name=getChatCustomerName();
-    document.getElementById('chatNameGate').style.display = name ? 'none' : 'flex';
-    document.getElementById('chatInputRow').style.display = name ? 'flex' : 'none';
-    if(name){ loadCustomerChatMessages(); startChatPolling(); }
+    const ready=hasChatCustomerData();
+    document.getElementById('chatNameGate').style.display = ready ? 'none' : 'flex';
+    document.getElementById('chatInputRow').style.display = ready ? 'flex' : 'none';
+    if(ready){ loadCustomerChatMessages(); startChatPolling(); }
+    else {
+      const n=document.getElementById('chatNameInput'); if(n) n.value=getChatCustomerName();
+      const a=document.getElementById('chatAddressInput'); if(a) a.value=getChatCustomerAddress();
+      const e=document.getElementById('chatEmailInput'); if(e) e.value=getChatCustomerEmail();
+    }
   } else {
     stopChatPolling();
   }
@@ -2631,9 +2647,25 @@ function openChatForProduct(productId){
   toggleChatPanel(true);
 }
 function submitChatName(){
-  const val=document.getElementById('chatNameInput').value.trim();
-  if(!val){showToast('Mohon isi nama Anda.',true);return;}
-  setChatCustomerName(val);
+  const nameVal=document.getElementById('chatNameInput').value.trim();
+  const addressVal=document.getElementById('chatAddressInput').value.trim();
+  const emailVal=document.getElementById('chatEmailInput').value.trim();
+  const errBox=document.getElementById('chatGateError');
+  const emailRegex=/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  if(!nameVal || !addressVal || !emailVal){
+    if(errBox){errBox.textContent='Nama lengkap, alamat lengkap, dan email wajib diisi.';errBox.style.display='block';}
+    showToast('Mohon lengkapi nama, alamat, dan email Anda.',true);
+    return;
+  }
+  if(!emailRegex.test(emailVal)){
+    if(errBox){errBox.textContent='Format email tidak valid.';errBox.style.display='block';}
+    showToast('Mohon isi email yang valid.',true);
+    return;
+  }
+  if(errBox) errBox.style.display='none';
+
+  setChatCustomerData(nameVal, addressVal, emailVal);
   document.getElementById('chatNameGate').style.display='none';
   document.getElementById('chatInputRow').style.display='flex';
   loadCustomerChatMessages();
@@ -2654,7 +2686,7 @@ async function sendCustomerChatMsg(){
   const msg=input.value.trim();
   if(!msg) return;
   const sid=getChatSessionId();
-  const payload={session_id:sid, customer_name:getChatCustomerName(), sender:'customer', message:msg, product_id:chatContextProduct?chatContextProduct.id:null, product_name:chatContextProduct?chatContextProduct.name:null};
+  const payload={session_id:sid, customer_name:getChatCustomerName(), customer_address:getChatCustomerAddress(), customer_email:getChatCustomerEmail(), sender:'customer', message:msg, product_id:chatContextProduct?chatContextProduct.id:null, product_name:chatContextProduct?chatContextProduct.name:null};
   input.value='';
   const {error}=await sb.from('live_chat_messages').insert(payload);
   if(error){ showToast('Gagal mengirim pesan. Pastikan tabel live_chat_messages tersedia.',true); return; }
@@ -2664,7 +2696,7 @@ function startChatPolling(){ stopChatPolling(); chatPollTimer=setInterval(loadCu
 function stopChatPolling(){ if(chatPollTimer){clearInterval(chatPollTimer);chatPollTimer=null;} }
 async function pollUnreadChatBadge(){
   const sid=getChatSessionId();
-  if(!getChatCustomerName()) return;
+  if(!hasChatCustomerData()) return;
   const {data,error}=await sb.from('live_chat_messages').select('id').eq('session_id',sid).eq('sender','admin').eq('is_read',false);
   if(error) return;
   const badge=document.getElementById('chatFabBadge');
@@ -2690,7 +2722,9 @@ function updateChatPendingBadge(){
 function chatSessions(){
   const map={};
   LIVE_CHAT.forEach(m=>{
-    if(!map[m.session_id]) map[m.session_id]={session_id:m.session_id, customer_name:m.customer_name||'Anonim', messages:[], lastAt:m.created_at, unread:0};
+    if(!map[m.session_id]) map[m.session_id]={session_id:m.session_id, customer_name:m.customer_name||'Anonim', customer_address:m.customer_address||'', customer_email:m.customer_email||'', messages:[], lastAt:m.created_at, unread:0};
+    if(!map[m.session_id].customer_address && m.customer_address) map[m.session_id].customer_address=m.customer_address;
+    if(!map[m.session_id].customer_email && m.customer_email) map[m.session_id].customer_email=m.customer_email;
     map[m.session_id].messages.push(m);
     map[m.session_id].lastAt=m.created_at;
     if(m.sender==='customer' && !m.is_read) map[m.session_id].unread++;
@@ -2720,6 +2754,7 @@ function renderAdminLiveChat(){
         <div>
           ${active?`
           <div class="admin-panel-title">${escHtml(active.customer_name)} ${active.messages[0]&&active.messages[0].product_name?`— <span style="color:var(--gold);font-weight:400;">${escHtml(active.messages[0].product_name)}</span>`:''}</div>
+          <div style="font-size:11px;color:#888;margin:-8px 0 12px;line-height:1.6;">${active.customer_address?`📍 ${escHtml(active.customer_address)}`:''}${active.customer_address&&active.customer_email?' &nbsp;·&nbsp; ':''}${active.customer_email?`✉️ ${escHtml(active.customer_email)}`:''}</div>
           <div class="chat-admin-thread">
             <div class="chat-admin-messages" id="adminChatMessages">${active.messages.map(m=>`<div class="chat-msg ${m.sender==='admin'?'admin':'customer'}" style="${m.sender==='admin'?'align-self:flex-start;':'align-self:flex-end;background:var(--gold);'}">${escHtml(m.message)}<div class="chat-msg-time">${formatChatTime(m.created_at)}</div></div>`).join('')}</div>
             <div class="chat-admin-input-row">
